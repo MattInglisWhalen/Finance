@@ -80,8 +80,9 @@ class TimeSlice:
         elif n == self._length-1 :
             delta1 = self.position_n(n) - self.position_n(n-1)
             delta2 = self.position_n(n) - self.position_n(n-2)
-            norm = delta1*delta2*(delta2-delta1)/2
-            return ( delta1*self.value_n(n-2) - delta2*self.value_n(n-1) + (delta2-delta1)*self.value_n(n) )/norm
+            norm = (delta2-delta1)/2
+            return ( self.value_n(n-2)/delta2 - self.value_n(n-1)/delta1
+                     + (delta2-delta1)*self.value_n(n)/(delta1*delta2) )/norm
         # else
         delta1 = self.position_n(n+1) - self.position_n(n)
         delta2 = self.position_n(n) - self.position_n(n-1)
@@ -115,7 +116,15 @@ class TimeSlice:
     def plot_slice(self):
         plt.plot(self.positions,self.values)
         plt.show()
-        print("Here")
+
+    def validate_monotonic_increasing(self):
+        for idx, val in enumerate( self.values[1:]) :
+            n = idx+1
+            if self.value_n(n) - self.value_n(n-1) < 0 :
+                print(f"{n=} {self.position_n(n)=} {self.value_n(n-1)=} {self.value_n(n)=}")
+                # self.plot_slice()
+                return False
+        return True
 
 
 

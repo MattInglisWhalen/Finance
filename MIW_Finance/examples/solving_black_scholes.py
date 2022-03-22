@@ -1,9 +1,11 @@
 
 # built-in libraries
+import typing
+
 import numpy
 import numpy as np
 import matplotlib.pyplot as plt
-from math import log, sqrt, exp
+from math import log, sqrt, exp, ceil
 from scipy.stats import norm as normal_dist
 
 # internal classes
@@ -11,6 +13,8 @@ from MIW_Finance.src.market import Market
 from MIW_Finance.src.timeSlice import TimeSlice
 from MIW_Finance.src.asset import Asset
 from MIW_Finance.src.option import Option
+
+from time import perf_counter
 
 
 def true_black_scholes(price:float, market: Market, option: Option):
@@ -48,11 +52,12 @@ def geom_grid_everywhere(K, num_points_above:int = 60,
     return all_points
 
 
-def dense_grid_around(K, num_core_points:int = 20, num_points_above:int = 50,
+def dense_grid_around(K, num_core_points:int = 20, num_points_above:int = 50, core_size_in_tenths:float = 1,
                       lower_limit_absolute:float = 1, upper_limit_multiple:float = 10) -> list:
 
-    core_points = np.linspace(K-K/10,K+K/10,num_core_points)
-    above_points = np.geomspace(K + K/10 + K/(5*num_core_points), upper_limit_multiple*K, num_points_above )
+    M=core_size_in_tenths
+    core_points = np.linspace(K-M*K/10,K+M*K/10,num_core_points)
+    above_points = np.geomspace(K + M*K/10 + 2*K/(10*num_core_points), upper_limit_multiple*K, num_points_above )
     below_points = []
     for Si in reversed(above_points) :
         new_point = K - (Si-K)
@@ -121,17 +126,20 @@ def black_scholes_Vdot_of_tslice_idx(tslice: TimeSlice, idx: int, market: Market
 
     delta1 = tslice.position_n(idx+1) - tslice.position_n(idx)
     delta2 = tslice.position_n(idx) - tslice.position_n(idx-1)
-    norm = delta1*delta2*(delta2+delta1)/2
+    norm = (delta2+delta1)/2
     V = tslice.value_n(idx)
-    Vprime = (tslice.value_n(idx+1) - tslice.value_n(idx-1)) / (delta1+delta2)
-    Vprimeprime = ( delta2*tslice.value_n(idx+1)
-                    + delta1*tslice.value_n(idx-1)
-                    - (delta1+delta2)*tslice.value_n(idx) ) / norm
 
+    Vprime = (tslice.value_n(idx+1) - tslice.value_n(idx-1)) / (delta1+delta2)
+    Vprimeprime = ( tslice.value_n(idx+1)/delta1
+                        + tslice.value_n(idx-1)/delta2
+                        - (delta1+delta2)*tslice.value_n(idx)/(delta1*delta2) ) / norm
     Vdot = 0.
-    Vdot += (sigma*sigma*S*S/2)*Vprimeprime
-    Vdot += r*S*Vprime
-    Vdot += (-r*V)
+    Vdot += (sigma * sigma * S * S / 2) * Vprimeprime
+    Vdot += r * S * Vprime
+    Vdot += (-r * V)
+
+    # print(f"{delta1=} {delta2=} {S=} {tslice.value_n(idx)=} {Vprime=} {Vprimeprime=}")
+
     return Vdot
 
 
@@ -179,6 +187,7 @@ def next_timeslice_from_BS_explicit_RK4(tslice: TimeSlice,
 
     new_values = tslice.values + (dt/6)*(K1_list + 2*K2_list + 2*K3_list + K4_list)
     new_tslice = TimeSlice(tau=tslice.tau+dt, positions_list=tslice.positions, values_list=new_values)
+    new_tslice.validate_monotonic_increasing()
     return new_tslice
 
 
@@ -259,7 +268,7 @@ def next_timeslice_from_BS_Crank_Nicholson(tslice: TimeSlice, market: Market, op
     explicit_transfer = create_IE_transfer_matrix(tslice, market, option, -dt/2)
     b = tslice.values + np.matmul(explicit_transfer,tslice.values)
     b[-1] += dt*option.K*market.r*exp(-market.r*tslice.tau)
-    A = numpy.identity(N) + create_IE_transfer_matrix(tslice, market, option, dt/2)
+    A = np.identity(N) + create_IE_transfer_matrix(tslice, market, option, dt/2)
 
     new_values = np.linalg.solve(A, b)
     new_tslice = TimeSlice(tau=tslice.tau + dt, positions_list=tslice.positions, values_list=new_values)
@@ -273,6 +282,65 @@ def next_timeslice_from_BS_Crank_Nicholson(tslice: TimeSlice, market: Market, op
 Method of lines
 """
 
+"""
+Helper function
+"""
+
+
+def get_history_with_method(method: str, market:Market, option:Option,
+                            init_slice:TimeSlice, num_timesteps:int) -> list[TimeSlice] :
+
+    timestep = option.T/num_timesteps
+    primed_history = [init_slice]
+    time_stepping_method: typing.Callable = None
+
+    if method == "Explicit Euler" :
+        time_stepping_method = next_timeslice_from_BS_explicit_Euler
+    elif method == "Explicit RK4" :
+        time_stepping_method = next_timeslice_from_BS_explicit_RK4
+    elif method == "Implicit Euler" :
+        time_stepping_method = next_timeslice_from_BS_implicit_Euler
+    elif method == "Crank-Nicholson" :
+        time_stepping_method = next_timeslice_from_BS_Crank_Nicholson
+    else :
+        print(f"get_history_with_method: No such solution method {method}")
+        raise NotImplementedError
+
+    priming_steps = 100
+    priming_dt = timestep/priming_steps
+    i = 0
+    # prime the long-time evolution using smaller time-steps to get away from the "sharp" initial conditions
+    while i < priming_steps:
+        new_slice = time_stepping_method(primed_history[i],market=market,option=option,dt=priming_dt)
+        primed_history.append(new_slice)
+        valid = new_slice.validate_monotonic_increasing()
+        if not valid:
+            print(f"Halving priming time step from {priming_dt} to {priming_dt/2}")
+            priming_dt /= 2
+            priming_steps *= 2
+            primed_history = [init_slice]
+            i = -1
+        i += 1
+
+    time_left = option.T - timestep
+    timestep = time_left/num_timesteps
+    history = primed_history.copy()
+    j = 0
+    while j < num_timesteps:
+        i = j + priming_steps
+        new_slice = time_stepping_method(history[i],market=market,option=option,dt=timestep)
+        history.append(new_slice)
+        valid = new_slice.validate_monotonic_increasing()
+        if not valid:
+            print(f"At time {new_slice.tau}, halving time step from {timestep} to {timestep/2}")
+            timestep /= 2
+            num_timesteps *= 2
+            history = primed_history.copy()
+            j = -1
+        j += 1
+
+    print(history[-1].tau)
+    return history
 
 
 """
@@ -320,49 +388,44 @@ def solve_black_scholes(market: Market, option: Option, num_timesteps: int) -> f
 
     """
 
-    timestep = option.T/num_timesteps
-
     # densely pack the grid near the strike price
-    # grid = dense_grid_around(K=option.K)
-    grid = geom_grid_everywhere(K=option.K, num_points_above=60)
+    grid = dense_grid_around(K=option.K, num_core_points=200, core_size_in_tenths=4)
+    # grid = geom_grid_everywhere(K=option.K, num_points_above=100)
     init_profile = [init_cond_call(Si,option.K) for Si in grid]
     init_slice = TimeSlice(tau=0,positions_list=grid,values_list=init_profile)
 
     # simulated history
-    history_EL = [init_slice]
-    for islice in range(num_timesteps):
-        history_EL.append(next_timeslice_from_BS_explicit_Euler(history_EL[islice],
-                                                                market=market,
-                                                                option=option,
-                                                                dt=timestep)
-                          )
+    start = perf_counter()
+    history_EE = get_history_with_method("Explicit Euler",market=market,option=option,init_slice=init_slice,
+                                         num_timesteps=num_timesteps)
 
-    history_RK4 = [init_slice]
-    for islice in range(num_timesteps):
-        history_RK4.append(next_timeslice_from_BS_explicit_RK4(history_RK4[islice],
-                                                               market=market,
-                                                               option=option,
-                                                               dt=timestep)
-                           )
-    history_IE = [init_slice]
-    for islice in range(num_timesteps):
-        history_IE.append(next_timeslice_from_BS_implicit_Euler(history_IE[islice],
-                                                                market=market,
-                                                                option=option,
-                                                                dt=timestep)
-                           )
+    end = perf_counter()
+    print(f"Explicit Euler timing: {end - start}")
 
-    history_CN = [init_slice]
-    for islice in range(num_timesteps):
-        history_CN.append(next_timeslice_from_BS_Crank_Nicholson(history_CN[islice],
-                                                                 market=market,
-                                                                 option=option,
-                                                                 dt=timestep)
-                           )
+    start = perf_counter()
+    history_RK4 = get_history_with_method("Explicit RK4",market=market,option=option,init_slice=init_slice,
+                                          num_timesteps=num_timesteps)
 
-    # exact result at t=0
+    end = perf_counter()
+    print(f"Explicit RK4 timing: {end - start}")
+
+    start = perf_counter()
+    history_IE = get_history_with_method("Implicit Euler",market=market,option=option,init_slice=init_slice,
+                                         num_timesteps=num_timesteps)
+
+    end = perf_counter()
+    print(f"Implicit Euler timing: {end - start}")
+
+    start = perf_counter()
+    history_CN = get_history_with_method("Crank-Nicholson",market=market,option=option,init_slice=init_slice,
+                                         num_timesteps=num_timesteps)
+
+    end = perf_counter()
+    print(f"Crank-Nicholson timing: {end-start}")
+
+    # exact result at t=0 (tau = T)
     true_prices_on_grid = [ true_black_scholes(price=Si, market=market, option=option)
-                            for Si in history_EL[0].positions ]
+                            for Si in history_EE[0].positions ]
 
 
     """
@@ -371,22 +434,24 @@ def solve_black_scholes(market: Market, option: Option, num_timesteps: int) -> f
 
 
     # overlayed explicit Euler
-    plt.plot( history_EL[-1].positions, true_prices_on_grid)
-    plt.plot( history_EL[-1].positions, history_EL[-1].values)
+    plt.plot( history_EE[-1].positions, true_prices_on_grid)
+    plt.plot( history_EE[-1].positions, history_EE[-1].values)
     plt.ylim(0, 500)
     plt.show()
 
     # %diff explicit Euler
-    percentdiff = [ 100*(history_EL[-1].value_n(idx) - true_prices_on_grid[idx])/true_prices_on_grid[idx]
-                    if true_prices_on_grid[idx] > 0.0001 else 0 for idx, _ in enumerate(true_prices_on_grid) ]
-    absdiff = [ history_EL[-1].value_n(idx) - true_prices_on_grid[idx] for idx, _ in enumerate(true_prices_on_grid) ]
-    plt.scatter( history_EL[-1].positions, percentdiff)
+    percentdiff = [ 100*(history_EE[-1].value_n(idx) - true_prices_on_grid[idx])/true_prices_on_grid[idx]
+                    if true_prices_on_grid[idx] != 0. else 0 for idx, _ in enumerate(true_prices_on_grid) ]
+    absdiff = [ history_EE[-1].value_n(idx) - true_prices_on_grid[idx] for idx, _ in enumerate(true_prices_on_grid) ]
+    plt.scatter( history_EE[-1].positions, percentdiff)
+
     plt.ylim(-10,10)
     plt.show()
 
     # abs diff forward Euler
-    plt.scatter( history_EL[-1].positions, absdiff)
-    plt.ylim(-.1, .1)
+    plt.scatter( history_EE[-1].positions, absdiff)
+    max_mag = 10**ceil( max( np.log10( np.abs(absdiff) + 1e-6 ) ) )
+    plt.ylim(-max_mag, max_mag)
     plt.show()
 
     """"""
@@ -399,7 +464,7 @@ def solve_black_scholes(market: Market, option: Option, num_timesteps: int) -> f
 
     # %diff explicit RK4
     percentdiff = [ 100*(history_RK4[-1].value_n(idx) - true_prices_on_grid[idx])/true_prices_on_grid[idx]
-                    if true_prices_on_grid[idx] > 0.0001 else 0 for idx, _ in enumerate(true_prices_on_grid) ]
+                    if true_prices_on_grid[idx] != 0. else 0 for idx, _ in enumerate(true_prices_on_grid) ]
     absdiff = [ history_RK4[-1].value_n(idx) - true_prices_on_grid[idx] for idx, _ in enumerate(true_prices_on_grid) ]
     plt.scatter( history_RK4[-1].positions, percentdiff)
     plt.ylim(-10,10)
@@ -407,7 +472,8 @@ def solve_black_scholes(market: Market, option: Option, num_timesteps: int) -> f
 
     # abs diff RK4
     plt.scatter( history_RK4[-1].positions, absdiff)
-    plt.ylim(-.1, .1)
+    max_mag = 10**ceil( max( np.log10( np.abs(absdiff) + 1e-6 ) ) )
+    plt.ylim(-max_mag, max_mag)
     plt.show()
 
     """ """
@@ -420,7 +486,7 @@ def solve_black_scholes(market: Market, option: Option, num_timesteps: int) -> f
 
     # %diff implicit Euler
     percentdiff = [ 100*(history_IE[-1].value_n(idx) - true_prices_on_grid[idx])/true_prices_on_grid[idx]
-                    if true_prices_on_grid[idx] > 0.0001 else 0 for idx, _ in enumerate(true_prices_on_grid) ]
+                    if true_prices_on_grid[idx] != 0. else 0 for idx, _ in enumerate(true_prices_on_grid) ]
     absdiff = [ history_IE[-1].value_n(idx) - true_prices_on_grid[idx] for idx, _ in enumerate(true_prices_on_grid) ]
     plt.scatter( history_IE[-1].positions, percentdiff)
     plt.ylim(-10,10)
@@ -428,7 +494,8 @@ def solve_black_scholes(market: Market, option: Option, num_timesteps: int) -> f
 
     # abs diff implicit Euler
     plt.scatter( history_IE[-1].positions, absdiff)
-    plt.ylim(-.1, .1)
+    max_mag = 10**ceil( max( np.log10( np.abs(absdiff) + 1e-6 ) ) )
+    plt.ylim(-max_mag, max_mag)
     plt.show()
 
     """ """
@@ -441,7 +508,7 @@ def solve_black_scholes(market: Market, option: Option, num_timesteps: int) -> f
 
     # %diff Crank-Nicholson
     percentdiff = [100 * (history_CN[-1].value_n(idx) - true_prices_on_grid[idx]) / true_prices_on_grid[idx]
-                   if true_prices_on_grid[idx] > 0.0001 else 0 for idx, _ in enumerate(true_prices_on_grid)]
+                   if true_prices_on_grid[idx] != 0. else 0 for idx, _ in enumerate(true_prices_on_grid)]
     absdiff = [history_CN[-1].value_n(idx) - true_prices_on_grid[idx] for idx, _ in enumerate(true_prices_on_grid)]
     plt.scatter(history_CN[-1].positions, percentdiff)
     plt.ylim(-10, 10)
@@ -449,12 +516,13 @@ def solve_black_scholes(market: Market, option: Option, num_timesteps: int) -> f
 
     # abs diff Crank-Nicholson
     plt.scatter(history_CN[-1].positions, absdiff)
-    plt.ylim(-.1, .1)
+    max_mag = 10**ceil( max( np.log10( np.abs(absdiff) + 1e-6 ) ) )
+    plt.ylim(-max_mag, max_mag)
     plt.show()
 
     print("\n Slices at endpoint:")
     print(history_RK4[-1].positions[20:30])
-    print(history_EL[-1].values[20:30])
+    print(history_EE[-1].values[20:30])
     print(history_RK4[-1].values[20:30])
     print(history_IE[-1].values[20:30])
     print(history_CN[-1].values[20:30])
@@ -467,6 +535,8 @@ def solve_black_scholes(market: Market, option: Option, num_timesteps: int) -> f
 
 
 if __name__ == "__main__" :
+
+    np.seterr(all="raise")
 
     # Asset and derivative info
     tsx = Market(name="TSX", risk_free_interest_rate=0.05)

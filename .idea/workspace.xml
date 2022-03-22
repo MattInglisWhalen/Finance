@@ -2,13 +2,9 @@
 <project version="4">
   <component name="ChangeListManager">
     <list default="true" id="e791f3d7-e6aa-45a1-8c70-0af86f106800" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.idea/.gitignore" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/MIW_Finance/examples/solving_black_scholes.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/MIW_Finance/src/asset.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/MIW_Finance/src/derivative.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/MIW_Finance/src/market.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/MIW_Finance/src/option.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/MIW_Finance/src/timeSlice.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/MIW_Finance/examples/solving_black_scholes.py" beforeDir="false" afterPath="$PROJECT_DIR$/MIW_Finance/examples/solving_black_scholes.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/MIW_Finance/src/timeSlice.py" beforeDir="false" afterPath="$PROJECT_DIR$/MIW_Finance/src/timeSlice.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
